@@ -229,6 +229,37 @@ Directory trust dialog on first run per repo root: "Do you trust the contents of
 Accept with Enter.
 The decision persists for the repo, so later worktrees of the same project skip it.
 
+**The residual per-command approval prompt is an enterprise-managed policy override, not a codex flag-handling bug, and a codex version upgrade will most likely NOT fix it (verified 2026-08-27, codex-cli 0.145.0).**
+A fresh worktree can chain up to three dialogs before real work starts: the directory-trust dialog above, a hooks-review dialog new in 0.145, and an ordinary per-command approval prompt.
+The three findings below are three different kinds of result and must not be collapsed into one.
+
+**1. `-a never` and `-s danger-full-access` verifiably do NOT help, alone or paired.**
+Live-tested on a real shell write (`mkdir -p sub/dir && echo ok > sub/dir/proof.txt`, a write inside the agent's own worktree, the same shape as the originally reported `mkdir -p docs/design-audit/stage1` incident): the combined `--dangerously-bypass-approvals-and-sandbox` alone, and the explicit pair `-a never -s danger-full-access`, produced byte-identical results in the interactive TUI - the same override warnings on launch and the same blocking "Would you like to run the following command?" prompt at the same command.
+Neither ever wrote the file without a human answering that prompt.
+
+**2. `--dangerously-bypass-hook-trust` verifiably DOES work, and is worth passing regardless of the approval issue.**
+0.145 adds a second onboarding dialog after directory trust: "Hooks need review / N hooks are new or changed. Hooks can run outside the sandbox after you trust them.", with options `1. Review hooks`, `2. Trust all and continue`, `3. Continue without trusting (hooks won't run)`.
+Live-reproduced with a scratch `CODEX_HOME` copy carrying the same `hooks.json` but no persisted `hooks.state` trust entries: the cursor default is `1. Review hooks`, NOT `2. Trust all and continue`, so a reflexive Enter opens per-hook review instead of trusting them and silently leaves hooks disabled.
+This dialog is keyed to hook file content hash rather than to the worktree, so it will not reappear on this operator's already-trusted hooks until their content next changes.
+`--dangerously-bypass-hook-trust` reliably suppressed it in the same scratch `CODEX_HOME`: hooks ran with no review dialog at all.
+This flag is unrelated to the approval override below and is safe to add whenever the launch command is next revisited.
+
+**3. The residual approval gate is a genuine enterprise-managed override, not an ignored flag - here is what distinguishes the two.**
+Every tested launch - the combined flag, the explicit pair, and both of those again through non-interactive `codex exec` - printed this warning trio verbatim, naming the exact value it rejected and the exact allowed set it fell back to instead of silently no-op'ing the flag:
+
+```
+warning: Configured value for `approval_policy` is disallowed by requirements; falling back to required value OnRequest. Details: invalid value for `approval_policy`: `Never` is not in the allowed set [OnRequest, UnlessTrusted] (set by enterprise-managed requirements Baseline (8e96d288-57e1-4cca-97eb-78f1ac9c3e66))
+warning: Configured value for `permission_profile` is disallowed by requirements; falling back to required value Managed { ... }. Details: invalid value for `sandbox_mode`: `DangerFullAccess` is not in the allowed set [WorkspaceWrite, ReadOnly] (set by enterprise-managed requirements Baseline (8e96d288-57e1-4cca-97eb-78f1ac9c3e66))
+```
+
+`codex doctor` independently corroborates the same resolved state: `sandbox restricted fs + restricted network · approval OnRequest`.
+`codex exec` with the same flags hard-fails a real write instead of prompting - `command execution approval is not supported in exec mode`, `Rejected("approval request failed")` - which only makes sense if approval is policy-mandated, since exec mode has no dialog to suppress in the first place; a flag-parsing bug would instead show no diagnostic, an inconsistent doctor state, or a silent no-op.
+The installed binary's own strings confirm the mechanism exists in the shipped code: `MdmManagedPreferences`, `EnterpriseManagedSystemRequirementsToml`, and a documented "Config layer stack" with `allowed_approval_policies` and `allowed_sandbox_modes` fields sit above ordinary user config in codex's own type system.
+That the delivery vehicle on this specific host is this operator's installed macOS configuration profiles is inferential, not directly confirmed: two profiles are installed (`profiles list`), but `profiles show` and `system_profiler SPConfigurationProfileDataType` returned no readable profile content in this environment, so the exact admin policy document was not inspected.
+Because the override lives in this separate, higher-precedence policy layer rather than in codex's CLI flag parser, a codex version upgrade will most likely NOT fix it - only a relaxed org policy or a codex-shipped automation exemption compatible with that policy would.
+Firstmate must not dispatch a codex crewmate or secondmate for unattended work on any host that shows this `enterprise-managed requirements Baseline` warning (or `codex doctor`'s `approval OnRequest` / restricted-sandbox line) until one of those happens.
+`bin/fm-spawn.sh`'s codex launch line is deliberately left unchanged: none of the tested flags change the outcome, so there is no more-correct flag to substitute.
+
 Resume after exit with `codex resume <session-id>`.
 The session id is printed on quit.
 
