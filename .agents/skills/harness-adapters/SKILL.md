@@ -126,7 +126,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | Harness | Model flag | Effort flag | Notes |
 |---|---|---|---|
 | claude | `--model <model>` | `--effort <low\|medium\|high\|xhigh\|max>` | Verified on Claude Code 2.1.196. |
-| codex | `--model <model>` | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'` | Verified on codex-cli 0.142.1. The installed binary schema contains `model_reasoning_effort`, the active config uses it, and the bundled model catalog advertises only low/medium/high/xhigh. `max` is omitted. Approval behavior is a separate axis from these two: on a host with an enterprise-managed approval override, a codex worker still blocks on a per-command approval prompt whatever model, effort, or bypass flag is passed, so read the codex section's unattended-dispatch guidance before choosing this harness. |
+| codex | `--model <model>` | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'` | Verified on codex-cli 0.142.1. The installed binary schema contains `model_reasoning_effort`, the active config uses it, and the bundled model catalog advertises only low/medium/high/xhigh. `max` is omitted. |
 | grok | `--model <model>` | `--reasoning-effort <low\|medium\|high>` | Verified on grok 0.2.99 (2026-07-13). `--effort` is an alias, but firstmate's profile axis is reasoning effort. As of 0.2.99 the ceiling is `high`; both `xhigh` and `max` are rejected with `use one of: high, medium, low`, so firstmate omits them. |
 | pi / pi-signed | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-27 on Pi and pi-signed 0.82.0. Both expose the same accepted thinking levels and completed the same model-qualified max-thinking smoke. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
@@ -210,7 +210,7 @@ A project-level `.claude/settings.json` only takes effect when Claude Code's pro
 After those settings are loaded, hook command resolution is still cwd-sensitive because Claude Code runs commands through `/bin/sh` against the session's current cwd; keep the tracked commands anchored through `"$CLAUDE_PROJECT_DIR"/bin/...` and see `docs/turnend-guard.md` for the verified Stop-hook details.
 Claude Code's primary watcher protocol is Stop-owned: the auto-arm hook fires on every Stop and foregrounds `bin/fm-watch-arm.sh` when the home is eligible and still needs supervision, and its exit-2 `asyncRewake` rewake is the wake; the model drains and handles wakes but never runs a routine re-arm command.
 
-## codex (VERIFIED 2026-06-11, codex-cli 0.139.0; approval-policy override and hook-trust dialog verified 2026-08-27 on codex-cli 0.145.0 - read the unattended-dispatch guidance below before choosing codex for a worker)
+## codex (VERIFIED 2026-06-11, codex-cli 0.139.0; startup dialogs and approval prompt re-verified 2026-08-27 on codex-cli 0.145.0)
 
 | Fact | Value |
 |---|---|
@@ -229,37 +229,16 @@ Directory trust dialog on first run per repo root: "Do you trust the contents of
 Accept with Enter.
 The decision persists for the repo, so later worktrees of the same project skip it.
 
-**Launch gating facts (verified 2026-08-27, codex-cli 0.145.0).**
-A fresh worktree can chain up to three dialogs before real work starts: the directory-trust dialog above, a hooks-review dialog new in 0.145, and an ordinary per-command approval prompt.
-The three facts below are three different kinds of result and must not be collapsed into one.
-[`docs/verification/codex-approval-policy.md`](../../../docs/verification/codex-approval-policy.md) owns the exact commands, the exact output, and the open questions.
-
-**1. The 0.145 hooks-review dialog does NOT accept Enter as trust.**
-It appears after directory trust as "Hooks need review / N hooks are new or changed. Hooks can run outside the sandbox after you trust them.", with options `1. Review hooks`, `2. Trust all and continue`, `3. Continue without trusting (hooks won't run)`.
-The cursor default is `1. Review hooks`, so unlike the directory-trust dialog above, a reflexive Enter opens per-hook review and silently leaves hooks disabled.
-Answer it by explicitly sending the key `2` ("Trust all and continue"), never Enter, then verify the postcondition: the pane has left the dialog and the brief is processing.
-The dialog is keyed to hook file content hash rather than to the worktree, so it will not reappear on already-trusted hooks until their content next changes.
-`--dangerously-bypass-hook-trust` suppressed it reliably for GLOBAL hooks in a scratch `CODEX_HOME`, the only scope that test exercised, and is safe to add whenever the launch command is next revisited; `bin/fm-spawn.sh` does not pass it today.
-That global-scope result is not evidence that codex's project-hook busy-state gate can open: `docs/verification/supervision.md` "Semantic busy state" and `bin/fm-busy-lib.sh` record that PROJECT hooks under `<worktree>/.codex/hooks.json` fired for neither a trusted interactive pane nor `codex exec` on this same version even WITH that flag, while global hooks fired in the same runs.
-Those are two different hook scopes, not a contradiction.
-
-**2. `-a never` and `-s danger-full-access` verifiably do NOT suppress the approval prompt, alone or paired.**
-Live-tested on a real shell write inside the agent's own worktree, the same shape as the originally reported `mkdir -p docs/design-audit/stage1` incident: the combined `--dangerously-bypass-approvals-and-sandbox` alone, and the explicit pair `-a never -s danger-full-access`, produced byte-identical results in the interactive TUI, both landing on the same blocking "Would you like to run the following command?" prompt at the same command.
-Neither ever wrote the file without a human answering that prompt.
-`bin/fm-spawn.sh`'s codex launch line is deliberately left unchanged: none of the tested flags change the outcome, so there is no more-correct flag to substitute.
-
-**3. The residual approval gate is a self-reported enterprise-managed override, and its mechanism is NOT established.**
-Every tested launch - the combined flag, the explicit pair, and both of those again through non-interactive `codex exec` - printed override warnings carrying the literal `enterprise-managed requirements Baseline`, naming the exact rejected value (`approval_policy` `Never`, `sandbox_mode` `DangerFullAccess`) and the allowed set it fell back to, instead of silently no-op'ing the flag.
-`codex doctor` corroborates the resolved state (`approval OnRequest` plus a restricted sandbox), and `codex exec` hard-fails the same write rather than prompting, which only makes sense if approval is mandated rather than merely un-suppressed, since exec mode has no dialog to suppress.
-What is proven is that those three flag combinations fail identically and that codex self-reports a policy override, which is a different observable failure than a silently-ignored flag.
-What is open is why this write was gated at all: the allowed `sandbox_mode` set nominally includes `WorkspaceWrite`, and the write was inside the agent's own worktree, where stock codex under `WorkspaceWrite` would not normally gate it.
-Do not assert whether a codex version upgrade would fix this, in either direction - that was not tested.
-
-**Dispatch guidance for an override host (advisory, not enforced).**
-Treat a host whose codex launch prints `enterprise-managed requirements Baseline`, or whose `codex doctor` reports `approval OnRequest` with a restricted sandbox, as one where a codex worker stalls on its first gated command until a human answers.
-Nothing mechanical stops that: codex remains a verified adapter, and `bin/fm-spawn.sh` does not refuse a codex launch, so this constraint only applies if whoever picks the harness applies it.
-It is most consequential in away mode and for a codex PRIMARY or secondmate, where no one is watching the pane to answer the prompt.
-When `config/crew-harness` or `config/secondmate-harness` names codex on such a host, take the same route as an unverified adapter above: tell the captain under `AGENTS.md` section 9, use a verified runtime that runs unattended for current work, and do not pause current work for that choice.
+**Launch facts (verified 2026-08-27, codex-cli 0.145.0).**
+0.145.0 presents two startup dialogs: the directory-trust prompt above, then a "Hooks need review" prompt whose default selection is option 1, `Review hooks`, so a bare Enter does NOT trust.
+With `--dangerously-bypass-approvals-and-sandbox` passed, an approval prompt was still observed for a write inside the agent's own worktree; `-a never` and `-s danger-full-access`, alone or paired, did not change that.
+The mechanism is not established.
+`bin/fm-spawn.sh`'s codex launch line is unchanged.
+`--dangerously-bypass-hook-trust` suppressed the hooks-review dialog in the one scratch configuration tested, a copy of the operator's real GLOBAL `hooks.json`.
+That says nothing about firstmate-written PROJECT hooks: `docs/verification/supervision.md` "Semantic busy state" (line 196) and `bin/fm-busy-lib.sh`'s `fm_busy_codex_hooks_verified` (lines 131-137) own that negative.
+codex exposes no semantic busy state, so `bin/fm-crew-state.sh` reports `unknown` for a healthy codex worker.
+Consequence: codex is not selectable for unattended crewmate work on this host pending a retest.
+[`docs/verification/codex-approval-policy.md`](../../../docs/verification/codex-approval-policy.md) owns the exact commands and output.
 
 Resume after exit with `codex resume <session-id>`.
 The session id is printed on quit.

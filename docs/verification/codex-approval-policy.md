@@ -2,7 +2,7 @@
 
 Audience: maintainer verification.
 
-Active empirical evidence for two codex-cli 0.145.0 launch findings: the residual per-command approval prompt that no tested flag suppresses, and the new hooks-review onboarding dialog that `--dangerously-bypass-hook-trust` does suppress.
+Active empirical evidence for two codex-cli 0.145.0 launch findings: the residual per-command approval prompt that no tested flag combination suppressed, and the new hooks-review onboarding dialog that `--dangerously-bypass-hook-trust` suppressed in the one configuration tested.
 [`.agents/skills/harness-adapters/SKILL.md`](../../.agents/skills/harness-adapters/SKILL.md) owns the operating facts; this record owns the exact commands, the exact output, and what is still unproven.
 Task chronology and ruled-out hypotheses stay in the private task report or PR evidence.
 
@@ -35,7 +35,7 @@ Neither wrote the probe file without a human answering that prompt.
 
 ## Approval override: launch warnings
 
-Every launch above printed override warnings that name the exact rejected value and the exact allowed set, rather than silently dropping the flag.
+Every launch above printed override warnings naming the rejected value and the allowed set.
 Two of those warning lines were captured:
 
 ```
@@ -43,14 +43,11 @@ warning: Configured value for `approval_policy` is disallowed by requirements; f
 warning: Configured value for `permission_profile` is disallowed by requirements; falling back to required value Managed { ... }. Details: invalid value for `sandbox_mode`: `DangerFullAccess` is not in the allowed set [WorkspaceWrite, ReadOnly] (set by enterprise-managed requirements Baseline (8e96d288-57e1-4cca-97eb-78f1ac9c3e66))
 ```
 
-`Managed { ... }` in the second line is an elision in this transcription, not codex's own rendering; the resolved struct is recorded under "Resolved managed profile" below.
+The second line carries `Managed { ... }` exactly as recorded; the struct body is not part of this record, so the resolved profile's contents are unestablished.
 The original note reported a third override warning line, concerning `windows.sandbox`, that was never transcribed, so it is not reproduced here and its exact text is unestablished.
 Because of that gap, match on the literal substring `enterprise-managed requirements Baseline` rather than on a fixed warning count when identifying an override host.
 
-## Resolved managed profile
-
-The concrete resolved `permission_profile` carries exactly one filesystem entry, `{path: Root, access: Read}`, so it grants no writable path anywhere.
-`codex doctor` reports the same resolved state at a coarser grain:
+## `codex doctor`
 
 ```
 sandbox restricted fs + restricted network · approval OnRequest
@@ -65,11 +62,9 @@ command execution approval is not supported in exec mode
 Rejected("approval request failed")
 ```
 
-Exec mode has no dialog to suppress, so a request for approval there means approval was mandated rather than merely un-suppressed.
+## Symbols in the installed binary
 
-## Mechanism present in the shipped binary
-
-Strings in the installed binary show the managed-policy layer exists in codex's own type system, above ordinary user config: `MdmManagedPreferences`, `EnterpriseManagedSystemRequirementsToml`, and a documented "Config layer stack" carrying `allowed_approval_policies` and `allowed_sandbox_modes` fields.
+The installed binary's strings contain `MdmManagedPreferences`, `EnterpriseManagedSystemRequirementsToml`, and a "Config layer stack" entry carrying `allowed_approval_policies` and `allowed_sandbox_modes` fields.
 
 ## Delivery vehicle: not established
 
@@ -86,14 +81,14 @@ system_profiler SPConfigurationProfileDataType
 
 Proven:
 
-- Three flag combinations - `--dangerously-bypass-approvals-and-sandbox`, the explicit pair `-a never -s danger-full-access`, and both again through `codex exec` - all fail identically to get an in-worktree write through without a human answer.
-- Codex's own diagnostics self-report an enterprise-managed requirements override of both `approval_policy` and `sandbox_mode`, which is a different observable failure than a silently-ignored flag.
+- Three flag combinations - `--dangerously-bypass-approvals-and-sandbox`, the explicit pair `-a never -s danger-full-access`, and both again through `codex exec` - all failed identically to get an in-worktree write through without a human answer.
+- Codex's own diagnostics report an enterprise-managed requirements override of both `approval_policy` and `sandbox_mode`.
 
 Open:
 
-- Why this particular write was gated is not established.
-  The warning's allowed `sandbox_mode` set nominally includes `WorkspaceWrite`, and the probe write was inside the agent's own worktree, where stock codex under `WorkspaceWrite` would not normally gate an in-workspace write.
-- The single `{path: Root, access: Read}` filesystem entry in the resolved profile is at least consistent with the gating, but it was never connected back to the allowed-set language in the warning; that link is the next thing to establish.
+- The mechanism is not established, including why this particular write was gated.
+  The warning's allowed `sandbox_mode` set nominally includes `WorkspaceWrite`, and the probe write was inside the agent's own worktree.
+- The resolved managed `permission_profile`'s contents were never captured.
 - Whether a codex version upgrade changes any of this was not tested and is not claimed either way.
 
 Not attempted, by explicit owner direction after a mid-task scope cut: any workaround for the approval override, any change to `bin/fm-spawn.sh`'s codex launch flags, and any further codex runs.
@@ -114,8 +109,6 @@ Reproduced with a scratch `CODEX_HOME` copy of the operator's real GLOBAL `~/.co
 The cursor default is option 1, `Review hooks`.
 `--dangerously-bypass-hook-trust` suppressed the dialog reliably in that same scratch `CODEX_HOME`, and those global hooks then ran with no review dialog at all.
 
-That result is scoped to GLOBAL hooks in `CODEX_HOME`, which is the only hook scope this test exercised.
-It does not contradict the separate finding in `docs/verification/supervision.md` "Semantic busy state": on the same codex-cli 0.145.0, PROJECT-scoped hooks under `<worktree>/.codex/hooks.json` fired for neither an interactive trusted pane nor `codex exec` even WITH `--dangerously-bypass-hook-trust`, while global hooks fired in the same runs.
-Those are two different hook scopes, so the flag opening the global trust gate is no evidence that the project-scoped codex busy-state gate in `bin/fm-busy-lib.sh` can open.
-
-The dialog is keyed to hook file content hash rather than to the worktree, so it does not reappear for already-trusted hooks until their content next changes.
+That result is scoped to the GLOBAL hooks in that scratch `CODEX_HOME`, the only hook scope this test exercised.
+It establishes nothing about firstmate-written PROJECT hooks under `<worktree>/.codex/hooks.json`: `docs/verification/supervision.md` "Semantic busy state" (line 196) and `bin/fm-busy-lib.sh`'s `fm_busy_codex_hooks_verified` (lines 131-137) own that negative and the codex busy-state gate it holds closed.
+Whether those project hooks were ever trusted under 0.145.0's new hooks-review gate is itself unrecorded, so the hook-trust state of that probe is an open question.
