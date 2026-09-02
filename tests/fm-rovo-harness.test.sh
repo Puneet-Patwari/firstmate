@@ -15,18 +15,47 @@ unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_IN
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-rovo-harness)
 
-# A minimal fake tmux for rovo's one-shot launch shape: send-keys -l logs the
-# literal launch command so the launch template can be asserted. rovo has no
-# readiness sidecar to simulate - a positional brief IS the delivery, exactly
-# like grok/cursor/muse - so this is a bare send-keys logger.
+# A stateful fake tmux for rovo's launch-then-send shape (the same shape kimi
+# uses): a positional brief is dead-on-arrival, so rovo launches BARE and only
+# receives an absolute brief pointer after a readiness gate, then a delivery
+# gate. This fake renders a rovo-shaped screen that advances through
+# launched -> ready -> pointer-typed -> delivered as the real spawn drives it, so
+# the launch command, the typed pointer, and both gates are exercised through
+# their real code paths rather than asserted from static text.
 make_rovo_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+printf '%s\n' "$*" >> "$FM_FAKE_TMUX_CALL_LOG"
+state=$(cat "$FM_FAKE_ROVO_STATE" 2>/dev/null || true)
+fake_screen() {
+  case "$state" in
+    ready)
+      printf 'Welcome to Rovo!\nContext: | 0.0%% 0/922K\n? for shortcuts.\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\n'
+      ;;
+    pointer-typed)
+      printf 'Context: | 0.0%% 0/922K\n╭────────────────────────────────╮\n│ > Read the brief and follow it │\n│                                │\n╰────────────────────────────────╯\n'
+      ;;
+    delivered)
+      printf 'Read the brief at %s and follow it exactly.\nContext: | 3.3%% 30.1K/922K\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\n' "$FM_FAKE_BRIEF_REAL"
+      ;;
+    *)
+      printf 'shell starting\n$ \n'
+      ;;
+  esac
+}
+fake_cursor_y() {
+  case "$state" in
+    pointer-typed) printf '4\n' ;;
+    ready|delivered) printf '4\n' ;;
+    *) printf '1\n' ;;
+  esac
+}
 case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_path}"*) printf '%s\n' "$FM_FAKE_PANE_PATH"; exit 0 ;;
+  *"#{cursor_y}"*) fake_cursor_y; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
@@ -40,11 +69,54 @@ case "${1:-}" in
       prev=$arg
     done
     if [ -n "$literal" ]; then
-      [ -z "${FM_FAKE_LAUNCH_LOG:-}" ] || printf '%s\n' "$literal" >> "$FM_FAKE_LAUNCH_LOG"
+      case "$literal" in
+        *'run --yolo'*)
+          printf '%s\n' "$literal" >> "$FM_FAKE_LAUNCH_LOG"
+          printf 'launched\n' > "$FM_FAKE_ROVO_STATE"
+          ;;
+        *)
+          printf '%s\n' "$literal" >> "$FM_FAKE_POINTER_LOG"
+          printf 'pointer-typed\n' > "$FM_FAKE_ROVO_STATE"
+          ;;
+      esac
+      exit 0
     fi
+    case " $* " in
+      *' Enter '*)
+        case "$state" in
+          launched)
+            if [ "${FM_FAKE_ROVO_READY:-yes}" = yes ]; then
+              printf 'ready\n' > "$FM_FAKE_ROVO_STATE"
+            fi
+            ;;
+          pointer-typed)
+            if [ "${FM_FAKE_ROVO_DELIVERY:-yes}" = yes ]; then
+              printf 'delivered\n' > "$FM_FAKE_ROVO_STATE"
+            else
+              printf 'ready\n' > "$FM_FAKE_ROVO_STATE"
+            fi
+            ;;
+        esac
+        ;;
+    esac
     exit 0
     ;;
-  capture-pane) exit 0 ;;
+  capture-pane)
+    start= end= prev=
+    for arg in "$@"; do
+      case "$prev" in
+        -S) start=$arg ;;
+        -E) end=$arg ;;
+      esac
+      case "$arg" in -S|-E) prev=$arg ;; *) prev= ;; esac
+    done
+    case "$start:$end" in
+      *[!0-9:]*|'':*|*:'') fake_screen ;;
+      *) fake_screen | awk -v start="$start" -v end="$end" \
+           'NR - 1 >= start && NR - 1 <= end' ;;
+    esac
+    exit 0
+    ;;
 esac
 exit 0
 SH
@@ -67,6 +139,9 @@ make_spawn_case() {
   fm_git_worktree "$proj" "$wt" "wt-$name"
   touch "$home/state/.last-watcher-beat"
   : > "$case_dir/launch.log"
+  : > "$case_dir/pointer.log"
+  : > "$case_dir/rovo.state"
+  : > "$case_dir/tmux-calls.log"
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin"
 }
 
@@ -86,12 +161,19 @@ run_spawn() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
+    FM_FAKE_POINTER_LOG="$case_dir/pointer.log" \
+    FM_FAKE_ROVO_STATE="$case_dir/rovo.state" \
+    FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
+    FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/brief.md" \
+    FM_FAKE_ROVO_READY="${FM_FAKE_ROVO_READY:-yes}" \
+    FM_FAKE_ROVO_DELIVERY="${FM_FAKE_ROVO_DELIVERY:-yes}" \
+    FM_ROVO_READY_POLLS=3 FM_ROVO_DELIVERY_POLLS=3 FM_ROVO_POLL_INTERVAL=0 \
     PATH="$fakebin:$BASE_PATH" \
     "$SPAWN" "$id" "$proj" --harness rovo --mode no-mistakes --yolo off "$@" 2>&1
 }
 
-test_rovo_launch_is_verified() {
-  local id rec out rc launch meta
+test_rovo_launch_then_send_is_verified() {
+  local id rec out rc launch pointer brief_real meta
   id="rovo-success-z1-$$"
   rec=$(make_spawn_case success "$id")
   read_spawn_record "$rec"
@@ -99,12 +181,15 @@ test_rovo_launch_is_verified() {
     "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
     --model auto --effort high)
   rc=$?
-  expect_code 0 "$rc" "verified rovo launch should succeed"
+  expect_code 0 "$rc" "verified rovo launch-then-send should succeed"
   assert_contains "$out" "spawned $id harness=rovo" "rovo spawn did not report success"
 
   launch=$(cat "$CASE_DIR/launch.log")
-  assert_contains "$launch" "$FAKEBIN_DIR/rovo' run --yolo" "rovo launch did not use the resolved binary with the plain positional-brief shape"
+  assert_contains "$launch" "$FAKEBIN_DIR/rovo' run --yolo" \
+    "rovo launch did not use the resolved binary with the bare launch-then-send shape"
   assert_not_contains "$launch" "--startup-receipt" "rovo launch used the incompatible --startup-receipt flag"
+  assert_not_contains "$launch" "encode launch-brief" "rovo launch carried a positional brief instead of launching bare"
+  assert_not_contains "$launch" "brief for rovo" "rovo launch embedded the brief body as a positional argument"
   assert_contains "$launch" "--model 'auto'" "rovo launch omitted the requested model"
   assert_contains "$launch" "env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS" \
     "rovo launch did not clear foreign primary markers"
@@ -112,10 +197,15 @@ test_rovo_launch_is_verified() {
     "rovo launch did not clear cursor's markers via the shared outer wrap"
   assert_not_contains "$launch" "turn-ended" "rovo launch embedded a turn-end path it does not own"
 
+  brief_real="$(cd "$HOME_DIR/data/$id" && pwd -P)/brief.md"
+  pointer=$(cat "$CASE_DIR/pointer.log")
+  [ "$pointer" = "Read the brief at $brief_real and follow it exactly." ] \
+    || fail "rovo pointer was not the exact absolute-path-only instruction: $pointer"
+
   meta="$HOME_DIR/state/$id.meta"
   assert_grep 'model=auto' "$meta" "rovo meta lost the requested model"
   assert_grep 'effort=high' "$meta" "rovo meta lost the requested effort"
-  pass "fm-spawn: rovo launches positionally with the plain-brief shape and clears foreign markers"
+  pass "fm-spawn: rovo launches bare, waits for readiness, and delivers its brief pointer"
 }
 
 test_rovo_effort_xhigh_is_recorded_but_omitted() {
@@ -145,6 +235,42 @@ test_rovo_effort_high_sets_config_override() {
   assert_contains "$launch" 'efficiencyLevel' "rovo launch did not set agent.efficiencyLevel via --config-override"
   assert_contains "$launch" '"high"' "rovo launch did not carry the requested efficiency level"
   pass "fm-spawn: rovo's supported effort values ride --config-override"
+}
+
+test_rovo_readiness_gate_precedes_pointer() {
+  local id rec out rc
+  id="rovo-not-ready-z3-$$"
+  rec=$(make_spawn_case not-ready "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_ROVO_READY=no run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "rovo spawn without a ready signal should fail"
+  assert_contains "$out" "rovo did not show a verified ready signal" \
+    "rovo readiness failure lacked a loud diagnostic"
+  assert_grep 'failed: rovo did not show a verified ready signal' "$HOME_DIR/state/$id.status" \
+    "rovo readiness failure did not leave a supervisor-visible failure"
+  [ ! -s "$CASE_DIR/pointer.log" ] || fail "rovo pointer was sent before an observable ready signal"
+  pass "fm-spawn: rovo never sends the brief pointer before an observable ready signal"
+}
+
+test_rovo_unconfirmed_delivery_fails_loudly() {
+  local id rec out rc pointer
+  id="rovo-drop-z7-$$"
+  rec=$(make_spawn_case drop "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_ROVO_DELIVERY=no run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unconfirmed rovo delivery should fail"
+  # The pointer was typed (readiness passed) but its delivery never confirmed.
+  pointer=$(cat "$CASE_DIR/pointer.log")
+  [ -n "$pointer" ] || fail "rovo never typed the pointer before the delivery gate"
+  assert_contains "$out" "rovo brief pointer delivery was not confirmed" \
+    "unconfirmed rovo delivery lacked a loud diagnostic"
+  assert_grep 'failed: rovo brief pointer delivery was not confirmed' "$HOME_DIR/state/$id.status" \
+    "unconfirmed rovo delivery did not leave a supervisor-visible failure"
+  pass "fm-spawn: rovo treats a silent pointer drop as a failed spawn"
 }
 
 test_rovo_missing_binary_refuses_before_pane_creation() {
@@ -263,9 +389,11 @@ test_rovo_busy_regex_isolated() {
   pass "busy detection: rovo's rendered busy line classifies through its own isolated fallback"
 }
 
-test_rovo_launch_is_verified
+test_rovo_launch_then_send_is_verified
 test_rovo_effort_xhigh_is_recorded_but_omitted
 test_rovo_effort_high_sets_config_override
+test_rovo_readiness_gate_precedes_pointer
+test_rovo_unconfirmed_delivery_fails_loudly
 test_rovo_missing_binary_refuses_before_pane_creation
 test_rovo_secondmate_is_refused
 test_rovo_detection_precedence_and_ancestry

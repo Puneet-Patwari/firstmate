@@ -190,10 +190,11 @@
 # log; muse and gemini are crewmate/scout only and are refused for --secondmate.
 # rovo installs no hook either - its eventHooks fire at tool granularity only,
 # never turn-end - so it carries no busy-source wiring at all and no turn-end
-# hook. It also has no readiness postcondition: a positional brief IS the
-# delivery, so it launches exactly like grok/cursor/muse with no post-launch
-# confirmation. Its busy state is a screen-scrape fallback like grok. rovo is
-# crewmate/scout only and is refused for --secondmate, for the same reason as muse.
+# hook. A positional brief is dead-on-arrival (rovo loads, never works, and drops
+# to an idle shell), so rovo launches BARE and receives an absolute brief pointer
+# only after a TUI readiness gate, then a delivery-confirmation gate - the same
+# launch-then-send shape as kimi. Its busy state is a screen-scrape fallback like
+# grok. rovo is crewmate/scout only and is refused for --secondmate, like muse.
 # cursor installs no per-task hook either: it writes state/<id>.cursor-session to
 # bind the pane to cursor's own conversation transcript (projects root, the exact
 # workspace path cursor records in .workspace-trusted, and the conversations that
@@ -1384,24 +1385,24 @@ launch_template() {
     # written below. Nothing to place in the template for it.
     # codex, opencode, and kimi are also markerless and share this inherited-marker hazard; changing their verified launch boundaries belongs in follow-up work.
     muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
-    # rovo (Atlassian Rovo CLI): a positional prompt starts the supervised
-    # interactive session, the grok/cursor/muse launch shape (verified, rovo
-    # 202609.1.2). --disable-permission-checks/--yolo makes every file CRUD
-    # operation and bash command run without confirmation; Atlassian-data and
-    # user MCP-server tools still prompt per its own printed caveat, which crew
-    # and scout tasks never touch. rovo has no readiness postcondition: the
-    # positional brief IS the delivery, exactly like grok/cursor/muse, so there
-    # is nothing to poll after launch. --startup-receipt was tried but rovo
-    # rejects it alongside a positional brief ("Invalid value: --startup-receipt
-    # requires prompt-free interactive mode in a terminal"), so the launch
-    # template does not use it. rovo does NOT scrub an inherited
+    # rovo (Atlassian Rovo CLI): a positional brief is dead-on-arrival - rovo
+    # loads, never enters a working state, and drops back to an idle shell within
+    # about 10-15 seconds (confirmed live four times over a raw PTY and once under
+    # real tmux with the exact send-keys shape below). So rovo launches BARE,
+    # exactly like kimi, and receives an absolute brief pointer only after the TUI
+    # readiness gate below. --disable-permission-checks/--yolo makes every file
+    # CRUD operation and bash command run without confirmation; Atlassian-data and
+    # user MCP-server tools still prompt per its own printed caveat, which crew and
+    # scout tasks never touch. --startup-receipt is not used either: it requires
+    # "prompt-free interactive mode", so it cannot gate a launch that will have a
+    # message typed into it. rovo does NOT scrub an inherited
     # CLAUDECODE/CURSOR_AGENT/etc, so foreign primary markers are cleared here as
     # defense in depth alongside the marker-ordering fix in bin/fm-harness.sh
     # (issue #3517); CURSOR_AGENT/CURSOR_INVOKED_AS are cleared by the shared
     # outer wrap below, like every other non-cursor harness. rovo has no
     # turn-end hook (its eventHooks fire at tool granularity only, never
     # turn-end), so no launch placeholder for one exists.
-    rovo) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS __ROVOBIN__ run --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    rovo) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS __ROVOBIN__ run --yolo __MODELFLAG____EFFORTFLAG__' ;;
     *) return 1 ;;
   esac
 }
@@ -2603,6 +2604,74 @@ kimi_spawn_fail() {  # <detail>
   echo "error: $1; inspect window $T" >&2
 }
 
+# rovo mirrors kimi's launch-then-send shape exactly: a positional brief is
+# dead-on-arrival, so rovo launches bare and takes its brief pointer only after a
+# readiness gate, then a delivery-confirmation gate. Both route their
+# composer-emptiness half through the shared classifier (fm_backend_composer_state)
+# like kimi. The banner and context-usage greps are launch-progress signals, not
+# composer shapes.
+rovo_capture() {
+  fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
+}
+
+rovo_composer_is_empty() {
+  [ "$(fm_backend_composer_state "$BACKEND" "$T" "$W" 2>/dev/null)" = empty ]
+}
+
+rovo_wait_for_ready() {
+  local pane i=0 max=${FM_ROVO_READY_POLLS:-60} interval=${FM_ROVO_POLL_INTERVAL:-0.5}
+  while [ "$i" -lt "$max" ]; do
+    pane=$(rovo_capture)
+    # Lead with rovo's fresh-launch ASCII welcome banner (confirmed live), the
+    # same primary evidence kimi's own 'Welcome to Kimi Code!' match uses. The
+    # composer-empty fallback is WEAKER for rovo than for kimi: rovo's idle
+    # composer renders an inline placeholder chip (luminance ~163, above the
+    # ghost-strip threshold) that bin/fm-composer-lib.sh does not currently strip
+    # (see the deliberately-unfixed composer-ghost gap in rovo.md), so it can read
+    # non-empty - hence the banner is the primary signal.
+    if printf '%s\n' "$pane" | grep -Fq 'Welcome to Rovo!' \
+       || rovo_composer_is_empty; then
+      return 0
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
+rovo_delivery_is_confirmed() {  # <plain-pane-capture>
+  local pane=$1
+  rovo_composer_is_empty || return 1
+  # rovo's real footer is `Context: <bar> N.N% NN.NK/NNNK` (e.g.
+  # "Context: ▎ 3.3% 30.1K/922K"). Confirm delivery when the sent pointer has
+  # scrolled into view OR the context-usage PERCENTAGE has advanced off zero. The
+  # regex tolerates the bar glyph and arbitrary spacing between the colon and the
+  # number (the [^%]* runs, unlike kimi's exact spacing) but is anchored to the
+  # digits BEFORE the % sign, so the always-nonzero total in the denominator
+  # (e.g. .../922K) can never masquerade as a nonzero usage percentage.
+  if printf '%s\n' "$pane" | grep -Fq 'Read the brief at' \
+     || printf '%s\n' "$pane" | grep -qiE 'context:[^%]*[1-9][^%]*%'; then
+    return 0
+  fi
+  return 1
+}
+
+rovo_wait_for_delivery() {
+  local pane i=0 max=${FM_ROVO_DELIVERY_POLLS:-40} interval=${FM_ROVO_POLL_INTERVAL:-0.5}
+  while [ "$i" -lt "$max" ]; do
+    pane=$(rovo_capture)
+    rovo_delivery_is_confirmed "$pane" && return 0
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
+rovo_spawn_fail() {  # <detail>
+  printf 'failed: %s\n' "$1" >> "$STATE/$ID.status"
+  echo "error: $1; inspect window $T" >&2
+}
+
 if [ "$RELAUNCH" -eq 1 ]; then
   # No worktree is acquired: the recorded one is reused as-is. What must be
   # proven instead is that the adopted endpoint's shell is actually sitting in
@@ -3352,6 +3421,30 @@ if [ "$HARNESS" = kimi ]; then
   fi
   if ! kimi_wait_for_delivery; then
     kimi_spawn_fail "kimi brief pointer delivery was not confirmed"
+    exit 1
+  fi
+fi
+if [ "$HARNESS" = rovo ]; then
+  if ! rovo_wait_for_ready; then
+    rovo_spawn_fail "rovo did not show a verified ready signal before brief delivery in window $T"
+    exit 1
+  fi
+  ROVO_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
+  ROVO_SUBMIT_RETRIES=${FM_ROVO_SUBMIT_RETRIES:-3}
+  ROVO_SUBMIT_SLEEP=${FM_ROVO_SUBMIT_SLEEP:-${FM_ROVO_POLL_INTERVAL:-0.5}}
+  ROVO_SUBMIT_SETTLE=${FM_ROVO_SUBMIT_SETTLE:-0}
+  if ! ROVO_SUBMIT_VERDICT=$(fm_backend_send_text_submit \
+      "$BACKEND" "$T" "$ROVO_POINTER" "$ROVO_SUBMIT_RETRIES" \
+      "$ROVO_SUBMIT_SLEEP" "$ROVO_SUBMIT_SETTLE" "$W"); then
+    rovo_spawn_fail "rovo brief pointer could not be submitted into window $T"
+    exit 1
+  fi
+  if [ "$ROVO_SUBMIT_VERDICT" = send-failed ]; then
+    rovo_spawn_fail "rovo brief pointer could not be submitted into window $T"
+    exit 1
+  fi
+  if ! rovo_wait_for_delivery; then
+    rovo_spawn_fail "rovo brief pointer delivery was not confirmed in window $T"
     exit 1
   fi
 fi

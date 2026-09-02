@@ -25,21 +25,33 @@ Rovo CLI: 202609.1.2
 
 `bin/fm-harness.sh` tests `ATLASSIAN_AGENT_TYPE=rovo` and `ROVODEV_CLI=1` before the `CLAUDECODE` line and matches ancestry `comm=rovo` otherwise; `tests/fm-rovo-harness.test.sh` pins both the marker-precedence order (a rovo marker outranks an inherited `CLAUDECODE`) and the markerless-ancestry fallback with faked `ps` output.
 
-## Launch: the positional-brief shape, reverted from --startup-receipt
+## Launch: bare launch-then-send, the kimi shape
 
-`fm-spawn.sh` builds `env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS <rovo-bin> run --yolo <model/effort flags> "<brief>"`, wrapped by the shared `env -u CURSOR_AGENT -u CURSOR_INVOKED_AS` prefix every non-cursor harness gets.
-The brief rides the positional argument, so delivery is the launch itself and there is no readiness postcondition, exactly like grok/cursor/muse.
+`fm-spawn.sh` builds `env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS <rovo-bin> run --yolo <model/effort flags>` - BARE, with no positional brief - wrapped by the shared `env -u CURSOR_AGENT -u CURSOR_INVOKED_AS` prefix every non-cursor harness gets.
+The brief is then typed in after the TUI comes up, the same launch-then-send shape kimi uses, through the same shared readers (`fm_backend_capture`, `fm_backend_composer_state`, `fm_backend_send_text_submit`):
 
-An earlier revision of this adapter added `--startup-receipt <path>` to poll a JSON readiness sidecar, but that flag is incompatible with a positional brief. Live, against the real binary, `rovo run --startup-receipt <path> --yolo "<brief>"` is rejected before it starts:
+1. `rovo_wait_for_ready` polls for the `Welcome to Rovo!` banner (primary) or a composer-empty verdict (weaker fallback, see the composer-ghost-text gap below).
+2. The pointer `Read the brief at <absolute-path> and follow it exactly.` is submitted via `fm_backend_send_text_submit`.
+3. `rovo_wait_for_delivery` confirms composer-empty AND either the echoed `Read the brief at` text or a nonzero `Context:` percentage (`context:[^%]*[1-9][^%]*%`, tolerant of the footer's bar glyph but anchored before the `%` so the `.../922K` denominator cannot false-positive).
+
+Each gate fails the spawn loudly (a `failed:` line in the task status file) if it never resolves, so a never-ready or silently-dropped delivery is a visible spawn failure rather than a half-wired pane.
+
+### Why not a positional brief
+
+A positional brief is dead-on-arrival. `rovo run --yolo "<brief>"` loads a spinner, never enters a working state, prints no reply, and drops back to a bare idle shell prompt within about 10-15 seconds. This was reproduced independently four times over a raw PTY (varying `TERM`, window size, workspace, and 60-150s windows) and once more under real tmux 3.6a driven with the exact `fm-spawn.sh` send-keys shape (new window, `send-keys -l` the full launch line, then `Enter`). `--startup-receipt` cannot rescue that shape either - it is rejected before start alongside any message:
 
 ```
 $ rovo run --startup-receipt receipt.json --yolo "Reply with PONG"
 Invalid value: --startup-receipt requires prompt-free interactive mode in a terminal
 ```
 
-So every real spawn carrying a brief would have failed 100% of the time under that template. Plain `rovo run --yolo "<brief>"` (no `--startup-receipt`) was confirmed live to start a persistent, steerable session exactly like grok/cursor/muse - it stays alive well past the initial reply and accepts a follow-up typed message. `--startup-receipt` remains a real, usable flag only for a bare (no-message) interactive launch, which this adapter does not use, so the launch template was reverted to the plain positional-brief shape and no sidecar is written or polled.
+so it can only gate a bare (no-message) launch, and this adapter always delivers a message, so it is not used.
 
-`tests/fm-rovo-harness.test.sh` pins the launch template (`run --yolo` directly, no `--startup-receipt`), the model/effort flags, the marker-clearing, the missing-binary refusal before any pane exists, and the crew/scout-only secondmate refusal, all against a fake `tmux` and a fake `rovo` binary (no real network or credentials needed for that portable suite).
+### The launch-then-send shape, confirmed live end to end
+
+Bare `rovo run --yolo`, driven over a raw PTY, was confirmed to: render the `Welcome to Rovo!` readiness banner; accept the typed pointer and act on it (a brief instructing a real `sleep 25` bash tool call drove the `Rovo is thinking` busy line); accept a mid-tool-call Escape that printed `Agent cancelled` (see the interrupt section); and exit cleanly on `/exit` with the `Run rovo --restore <id> to resume your conversation` hint. `tests/fm-rovo-signals-live-e2e.test.sh` is that end-to-end guard.
+
+`tests/fm-rovo-harness.test.sh` pins the portable half against a stateful fake `tmux` and a fake `rovo` binary (no real network or credentials): the launch command is bare (`run --yolo`, no positional brief, no `--startup-receipt`); the pointer typed after readiness is exactly `Read the brief at <absolute-path> and follow it exactly.`; delivery confirms via the context-percentage or echoed-pointer signal; a never-ready fake screen fails the spawn loudly; a dropped-submit fake screen fails the spawn loudly; and the model/effort flags, marker-clearing, missing-binary refusal before any pane exists, and crew/scout-only secondmate refusal all hold.
 
 ## Busy state: the "Rovo is thinking" fallback
 
@@ -68,17 +80,17 @@ Real typed text in the same row, captured separately, renders at `38;2;206;207;2
 Both values sit above `bin/fm-composer-lib.sh`'s default `FM_COMPOSER_GHOST_LUMA_MAX` of 128, so `fm_composer_strip_ghost` leaves the placeholder unstripped and a fresh rovo composer can misclassify as `pending` rather than `empty`.
 Raising the shared default was considered and rejected: muse's own real, must-not-be-stripped prompt glyph measures luminance ~149.9 (`muse.md`), below rovo's ghost luminance of ~163, so no single global threshold can keep muse's glyph real while dropping rovo's ghost chip.
 This is recorded as a known gap rather than patched, because the safe fix needs a harness-scoped signal the shared composer classifier does not carry today, and a threshold change risks regressing muse's already-credentialed behavior for a rovo-scoped fix.
-The blast radius is bounded to composer-emptiness consumers such as steering delivery, which already retries through the doorbell ladder on a non-`empty` read; it does not reach launch delivery, which rides the positional brief and never checks composer emptiness.
+The blast radius is bounded to composer-emptiness consumers such as steering delivery, which already retries through the doorbell ladder on a non-`empty` read.
+It does not block the launch-then-send gates. Readiness leads with the `Welcome to Rovo!` banner, so the ghost chip is never the deciding signal there. Delivery does require composer-empty as one conjunct (alongside the echoed pointer or a nonzero `Context:` percentage), but it is evaluated while rovo is actively processing the just-delivered brief - the inline placeholder chip renders only when the composer is idle at rest, not while a turn is in flight - so the composer reads genuinely empty during the delivery window and the gate resolves.
 
 ## Interrupt: confirmed under real tmux
 
 The `fm-rovo-smoke-s1` scout report recorded a single Escape printing `Agent cancelled` during a running tool call, using its own hand-rolled PTY VT emulator.
-An earlier raw-PTY check in this task did not reproduce that rendered text, but a follow-up live check under real tmux 3.6a reproduced the scout's exact finding: a single Escape sent during a genuine mid-flight bash tool call printed `Agent cancelled` in the captured pane.
-That check ran in an isolated `tmux -L <private-socket>` session/window, not the shared fleet session, and captured the pane with `tmux capture-pane` during a real `sleep`-based bash tool call.
-The earlier raw-PTY check's failure to reproduce that text is now understood as an artifact of that specific PTY/terminal setup, not a real behavior difference.
-The session was never wedged either way: `/exit` still exited cleanly with the `Run rovo --restore <id> to resume your conversation` hint immediately after the Escape.
+A follow-up live check under real tmux 3.6a reproduced the scout's exact finding: a single Escape sent during a genuine mid-flight bash tool call printed `Agent cancelled` in the captured pane, in an isolated `tmux -L <private-socket>` session/window, not the shared fleet session.
+The launch-then-send live guard (`tests/fm-rovo-signals-live-e2e.test.sh`) also reproduces it over a raw PTY. A single fixed-timer Escape had landed unreliably there - the exact instant the interrupt is delivered is timing-sensitive over a bare PTY, so one fixed Escape can fall between states - so the guard now sends Escape across the live `sleep 25` tool-call window until the cancel renders. That reproduced `Agent cancelled` on every run (it consistently landed within the first few attempts, ~8s into the tool call); a session that never rendered the cancel would exhaust every attempt and fail.
+The session was never wedged: `/exit` still exited cleanly with the `Run rovo --restore <id> to resume your conversation` hint immediately after the Escape.
 `bin/fm-control-lib.sh` records rovo's `fm_control_interrupt_ack_source` as `none`, the same conservative choice already made for claude, codex, grok, kimi, and cursor - a control-plane fact independent of whether the render happens to appear, because a rendered acknowledgement is not something the control plane depends on for any of those adapters.
-Escape is the recorded interrupt key, and its rendered evidence is now fully corroborated under real tmux rather than in tension with the code.
+Escape is the recorded interrupt key, and its rendered evidence is now corroborated both under real tmux and over a raw PTY rather than in tension with the code.
 
 ## OAuth token lifetime and silent refresh
 
