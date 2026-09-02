@@ -13,16 +13,12 @@ unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_IN
   ATLASSIAN_AGENT_TYPE ROVODEV_CLI
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
-TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-rovo-harness)
 
 # A minimal fake tmux for rovo's one-shot launch shape: send-keys -l logs the
-# literal launch command, and - because rovo writes its own
-# --startup-receipt readiness sidecar rather than rendering a composer state a
-# fake screen could emulate - extracts the receipt path from that literal and
-# writes the sidecar rovo itself would produce once its composer is
-# input-ready. FM_FAKE_ROVO_NO_RECEIPT suppresses that write for the negative
-# case.
+# literal launch command so the launch template can be asserted. rovo has no
+# readiness sidecar to simulate - a positional brief IS the delivery, exactly
+# like grok/cursor/muse - so this is a bare send-keys logger.
 make_rovo_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -45,18 +41,6 @@ case "${1:-}" in
     done
     if [ -n "$literal" ]; then
       [ -z "${FM_FAKE_LAUNCH_LOG:-}" ] || printf '%s\n' "$literal" >> "$FM_FAKE_LAUNCH_LOG"
-      case "$literal" in
-        *--startup-receipt*)
-          if [ "${FM_FAKE_ROVO_NO_RECEIPT:-0}" != 1 ]; then
-            rest=${literal#*--startup-receipt }
-            receipt=${rest%% *}
-            receipt=${receipt#\'}
-            receipt=${receipt%\'}
-            printf '{"schema_version":1,"native_session_id":"%s","workspace_root":"fake","pid":424242,"state":"input_ready"}\n' \
-              "${FM_FAKE_ROVO_SESSION_ID:-fake-session-z1}" > "$receipt"
-          fi
-          ;;
-      esac
     fi
     exit 0
     ;;
@@ -102,7 +86,6 @@ run_spawn() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
-    FM_ROVO_READY_POLLS="${FM_ROVO_READY_POLLS:-5}" FM_ROVO_POLL_INTERVAL=0 \
     PATH="$fakebin:$BASE_PATH" \
     "$SPAWN" "$id" "$proj" --harness rovo --mode no-mistakes --yolo off "$@" 2>&1
 }
@@ -112,7 +95,7 @@ test_rovo_launch_is_verified() {
   id="rovo-success-z1-$$"
   rec=$(make_spawn_case success "$id")
   read_spawn_record "$rec"
-  out=$(FM_FAKE_ROVO_SESSION_ID=session-abc123 run_spawn \
+  out=$(run_spawn \
     "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
     --model auto --effort high)
   rc=$?
@@ -120,8 +103,8 @@ test_rovo_launch_is_verified() {
   assert_contains "$out" "spawned $id harness=rovo" "rovo spawn did not report success"
 
   launch=$(cat "$CASE_DIR/launch.log")
-  assert_contains "$launch" "$FAKEBIN_DIR/rovo' run --startup-receipt" "rovo launch did not use the resolved binary and startup-receipt flag"
-  assert_contains "$launch" "--yolo" "rovo launch omitted --yolo"
+  assert_contains "$launch" "$FAKEBIN_DIR/rovo' run --yolo" "rovo launch did not use the resolved binary with the plain positional-brief shape"
+  assert_not_contains "$launch" "--startup-receipt" "rovo launch used the incompatible --startup-receipt flag"
   assert_contains "$launch" "--model 'auto'" "rovo launch omitted the requested model"
   assert_contains "$launch" "env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS" \
     "rovo launch did not clear foreign primary markers"
@@ -132,9 +115,7 @@ test_rovo_launch_is_verified() {
   meta="$HOME_DIR/state/$id.meta"
   assert_grep 'model=auto' "$meta" "rovo meta lost the requested model"
   assert_grep 'effort=high' "$meta" "rovo meta lost the requested effort"
-  assert_grep 'rovo_session_id=session-abc123' "$meta" "rovo meta did not record the native session id from its receipt"
-  assert_grep '"state":"input_ready"' "$HOME_DIR/state/$id.rovo-receipt" "rovo receipt sidecar was not left behind readable"
-  pass "fm-spawn: rovo launches positionally, clears foreign markers, and confirms readiness from its receipt"
+  pass "fm-spawn: rovo launches positionally with the plain-brief shape and clears foreign markers"
 }
 
 test_rovo_effort_xhigh_is_recorded_but_omitted() {
@@ -166,22 +147,6 @@ test_rovo_effort_high_sets_config_override() {
   pass "fm-spawn: rovo's supported effort values ride --config-override"
 }
 
-test_rovo_receipt_never_appears_fails_loudly() {
-  local id rec out rc
-  id="rovo-noreceipt-z3-$$"
-  rec=$(make_spawn_case noreceipt "$id")
-  read_spawn_record "$rec"
-  rc=0
-  out=$(FM_FAKE_ROVO_NO_RECEIPT=1 FM_ROVO_READY_POLLS=2 run_spawn \
-    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
-  [ "$rc" -ne 0 ] || fail "rovo spawn with no receipt should fail"
-  assert_contains "$out" "rovo did not write its startup receipt" \
-    "missing-receipt rovo failure lacked a loud diagnostic"
-  assert_grep 'failed: rovo did not write its startup receipt' "$HOME_DIR/state/$id.status" \
-    "missing-receipt rovo failure did not leave a supervisor-visible failure"
-  pass "fm-spawn: rovo treats a missing startup receipt as a failed spawn"
-}
-
 test_rovo_missing_binary_refuses_before_pane_creation() {
   local id rec out rc
   id="rovo-missing-z4-$$"
@@ -211,25 +176,6 @@ test_rovo_secondmate_is_refused() {
   assert_contains "$out" "rovo is a verified crewmate/scout adapter only" \
     "rovo secondmate refusal lacked its concrete reason"
   pass "fm-spawn: rovo cannot be launched as a secondmate"
-}
-
-test_rovo_teardown_removes_receipt() {
-  local id rec out rc
-  id="rovo-teardown-z7-$$"
-  rec=$(make_spawn_case teardown "$id")
-  read_spawn_record "$rec"
-  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
-  rc=$?
-  expect_code 0 "$rc" "rovo spawn should succeed before teardown"
-  assert_present "$HOME_DIR/state/$id.rovo-receipt" "rovo receipt was not present before teardown"
-
-  HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
-    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
-    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
-    FM_SPAWN_NO_GUARD=1 PATH="$FAKEBIN_DIR:$BASE_PATH" \
-    "$TEARDOWN" "$id" --force >/dev/null 2>&1 || fail "rovo teardown failed"
-  assert_absent "$HOME_DIR/state/$id.rovo-receipt" "rovo receipt survived teardown"
-  pass "fm-teardown: rovo's startup receipt is removed"
 }
 
 test_rovo_detection_precedence_and_ancestry() {
@@ -294,8 +240,6 @@ test_rovo_control_lib_table() {
   if fm_control_harness_supports_kind rovo secondmate; then
     fail "rovo should never support secondmate tasks"
   fi
-  fm_control_harness_wiring_paths rovo /wt /state taskid | grep -Fqx '/state/taskid.rovo-receipt' \
-    || fail "rovo's wiring-path table omitted its startup receipt sidecar"
   pass "fm-control-lib: rovo's lifecycle table matches its verified facts"
 }
 
@@ -322,10 +266,8 @@ test_rovo_busy_regex_isolated() {
 test_rovo_launch_is_verified
 test_rovo_effort_xhigh_is_recorded_but_omitted
 test_rovo_effort_high_sets_config_override
-test_rovo_receipt_never_appears_fails_loudly
 test_rovo_missing_binary_refuses_before_pane_creation
 test_rovo_secondmate_is_refused
-test_rovo_teardown_removes_receipt
 test_rovo_detection_precedence_and_ancestry
 test_rovo_control_lib_table
 test_rovo_busy_regex_isolated

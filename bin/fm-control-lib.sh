@@ -242,12 +242,6 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
     # is written into the worktree, whose own .gemini/settings.json belongs to
     # the project, and nothing global is installed.
     gemini) printf '%s\n' "$state/$id.gemini-settings.json" ;;
-    rovo)
-      # rovo installs no hook and no busy-source binding either: its readiness
-      # signal is its own --startup-receipt sidecar, retired the same way muse
-      # and cursor's sidecars are on a relaunch away from it.
-      printf '%s\n' "$state/$id.rovo-receipt"
-      ;;
   esac
 }
 
