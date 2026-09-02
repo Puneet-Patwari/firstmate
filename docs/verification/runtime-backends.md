@@ -63,6 +63,9 @@ The crewmate-only Muse Code 0.1.0-R708.1 adapter was verified separately on 2026
 Its installed `muse-bin-0.1.0-R708.1` foreground identity classified `alive`, while `musescore`, `amuse`, `muse-binary`, and `muse-bind` remained ambiguous in the portable regression.
 [`muse.md`](muse.md#process-identity) owns the artifact identity and launcher evidence for that verification.
 
+The crewmate/scout-only Rovo CLI 202609.1.2 adapter added `*rovo*` to the same glob family as `*grok*`/`*kimi*` in `fm_backend_tmux_classify_process_name`, a structural change verified only by the portable regression, because this host has no tmux installed to relaunch it against for a real `#{pane_current_command}`/foreground-`comm` capture.
+[`rovo.md`](rovo.md#backend-liveness-tmux-pending-herdr-full-pane-placement-not-attempted) owns that pending gap and the live evidence this task could establish instead - a raw-PTY smoke of the exact launch, readiness, busy, interrupt, and exit facts, over the same TTY contract tmux and herdr allocate.
+
 Bounded observed output:
 
 ```text
