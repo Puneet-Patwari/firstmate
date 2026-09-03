@@ -205,6 +205,8 @@ test_rovo_launch_then_send_is_verified() {
   meta="$HOME_DIR/state/$id.meta"
   assert_grep 'model=auto' "$meta" "rovo meta lost the requested model"
   assert_grep 'effort=high' "$meta" "rovo meta lost the requested effort"
+  assert_not_contains "$(cat "$CASE_DIR/tmux-calls.log")" "kill-window" \
+    "a successful rovo spawn must never tear down the endpoint it just delivered into"
   pass "fm-spawn: rovo launches bare, waits for readiness, and delivers its brief pointer"
 }
 
@@ -251,7 +253,9 @@ test_rovo_readiness_gate_precedes_pointer() {
   assert_grep 'failed: rovo did not show a verified ready signal' "$HOME_DIR/state/$id.status" \
     "rovo readiness failure did not leave a supervisor-visible failure"
   [ ! -s "$CASE_DIR/pointer.log" ] || fail "rovo pointer was sent before an observable ready signal"
-  pass "fm-spawn: rovo never sends the brief pointer before an observable ready signal"
+  grep -q "kill-window.*fm-$id" "$CASE_DIR/tmux-calls.log" \
+    || fail "a failed rovo readiness gate must tear down the exact endpoint it created instead of leaking an orphaned --yolo process"
+  pass "fm-spawn: rovo never sends the brief pointer before an observable ready signal, and tears down the created endpoint on failure"
 }
 
 test_rovo_unconfirmed_delivery_fails_loudly() {
@@ -270,7 +274,9 @@ test_rovo_unconfirmed_delivery_fails_loudly() {
     "unconfirmed rovo delivery lacked a loud diagnostic"
   assert_grep 'failed: rovo brief pointer delivery was not confirmed' "$HOME_DIR/state/$id.status" \
     "unconfirmed rovo delivery did not leave a supervisor-visible failure"
-  pass "fm-spawn: rovo treats a silent pointer drop as a failed spawn"
+  grep -q "kill-window.*fm-$id" "$CASE_DIR/tmux-calls.log" \
+    || fail "an unconfirmed rovo delivery must tear down the exact endpoint it created instead of leaking an orphaned --yolo process"
+  pass "fm-spawn: rovo treats a silent pointer drop as a failed spawn, and tears down the created endpoint"
 }
 
 test_rovo_missing_binary_refuses_before_pane_creation() {
@@ -384,9 +390,31 @@ test_rovo_busy_regex_isolated() {
   local out
   out=$(fm_busy_classify tmux fake:0 rovo taskid /nonexistent-state '⬢ Rovo is thinking...')
   [ "$out" = "busy rovo-regex" ] || fail "fm_busy_classify did not read a real rovo busy tail as busy rovo-regex, got '$out'"
+  # A tail with no busy marker at all is "can't tell," never definitive idle:
+  # rovo's fallback is best-effort, so absence of the marker must not let
+  # supervision conclude a still-working worker went idle.
   out=$(fm_busy_classify tmux fake:0 rovo taskid /nonexistent-state 'Context: 1% 2K/900K')
-  [ "$out" = "idle rovo-regex" ] || fail "fm_busy_classify did not read a real rovo idle tail as idle rovo-regex, got '$out'"
+  [ "$out" = "unknown rovo-regex" ] || fail "fm_busy_classify misread a marker-absent rovo tail as definitive idle instead of unknown, got '$out'"
   pass "busy detection: rovo's rendered busy line classifies through its own isolated fallback"
+}
+
+test_rovo_busy_marker_scrolled_out_of_tail_is_unknown() {
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-busy-lib.sh"
+  local tail40 out i
+  # fm_busy_rovo_tail_busy only inspects the last 12 nonblank lines. Build a
+  # captured tail where the busy marker is present but pushed out of that
+  # window by a long active turn's own output, so a naive "marker absent"
+  # check would misread this still-busy worker as idle.
+  tail40='⬢ Rovo is thinking...'
+  for i in $(seq 1 20); do
+    tail40="$tail40
+tool output line $i"
+  done
+  out=$(fm_busy_classify tmux fake:0 rovo taskid /nonexistent-state "$tail40")
+  [ "$out" = "unknown rovo-regex" ] \
+    || fail "an active rovo turn whose busy marker scrolled out of the tail must classify unknown, not idle; got '$out'"
+  pass "busy detection: a rovo busy marker scrolled out of the tail classifies unknown, never idle"
 }
 
 test_rovo_launch_then_send_is_verified
@@ -399,3 +427,4 @@ test_rovo_secondmate_is_refused
 test_rovo_detection_precedence_and_ancestry
 test_rovo_control_lib_table
 test_rovo_busy_regex_isolated
+test_rovo_busy_marker_scrolled_out_of_tail_is_unknown

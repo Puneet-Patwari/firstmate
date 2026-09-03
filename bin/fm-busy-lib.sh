@@ -967,10 +967,13 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
           return 0
         fi
       fi
+      # This fallback is best-effort: a long turn can scroll the busy marker
+      # out of the captured tail, so its absence means "can't tell," never
+      # definitive idle - matching the muse and cursor arms above.
       if printf '%s' "$tail40" | fm_busy_rovo_tail_busy; then
         printf 'busy rovo-regex'
       else
-        printf 'idle rovo-regex'
+        printf 'unknown rovo-regex'
       fi
       return 0
       ;;
