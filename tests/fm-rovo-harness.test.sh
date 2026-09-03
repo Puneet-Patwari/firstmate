@@ -134,7 +134,14 @@ make_spawn_case() {
   wt="$case_dir/wt"
   fakebin=$(make_rovo_fakebin "$case_dir/fake")
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
-  printf 'brief for rovo\n' > "$home/data/$id/brief.md"
+  cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Exercise Rovo dispatch.
+
+## Firstmate spec
+Verify launch and delivery behavior.
+EOF
   printf 'rovo\n' > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   touch "$home/state/.last-watcher-beat"
@@ -164,7 +171,7 @@ run_spawn() {
     FM_FAKE_POINTER_LOG="$case_dir/pointer.log" \
     FM_FAKE_ROVO_STATE="$case_dir/rovo.state" \
     FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
-    FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/brief.md" \
+    FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/launch-brief.md" \
     FM_FAKE_ROVO_READY="${FM_FAKE_ROVO_READY:-yes}" \
     FM_FAKE_ROVO_DELIVERY="${FM_FAKE_ROVO_DELIVERY:-yes}" \
     FM_ROVO_READY_POLLS=3 FM_ROVO_DELIVERY_POLLS=3 FM_ROVO_POLL_INTERVAL=0 \
@@ -197,7 +204,7 @@ test_rovo_launch_then_send_is_verified() {
     "rovo launch did not clear cursor's markers via the shared outer wrap"
   assert_not_contains "$launch" "turn-ended" "rovo launch embedded a turn-end path it does not own"
 
-  brief_real="$(cd "$HOME_DIR/data/$id" && pwd -P)/brief.md"
+  brief_real="$(cd "$HOME_DIR/data/$id" && pwd -P)/launch-brief.md"
   pointer=$(cat "$CASE_DIR/pointer.log")
   [ "$pointer" = "Read the brief at $brief_real and follow it exactly." ] \
     || fail "rovo pointer was not the exact absolute-path-only instruction: $pointer"
