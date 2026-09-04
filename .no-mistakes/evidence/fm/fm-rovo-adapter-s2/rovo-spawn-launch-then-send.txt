@@ -1,0 +1,31 @@
+=== spawn stdout ===
+warning: /private/var/folders/w3/15wvjyj17n15zn2qrmqs5nmm0000gn/T/fm-rovo-harness.7VXlI4/evidence/home/data/rovo-evidence-81260/launch-brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+spawned rovo-evidence-81260 harness=rovo kind=ship mode=no-mistakes yolo=off window=firstmate:fm-rovo-evidence-81260 worktree=/private/var/folders/w3/15wvjyj17n15zn2qrmqs5nmm0000gn/T/fm-rovo-harness.7VXlI4/evidence/wt
+
+=== actual launch command placed into the worker pane ===
+env -u CURSOR_AGENT -u CURSOR_INVOKED_AS env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS '/private/var/folders/w3/15wvjyj17n15zn2qrmqs5nmm0000gn/T/fm-rovo-harness.7VXlI4/evidence/fake/fakebin/rovo' run --yolo --model 'auto' --config-override '{"agent":{"efficiencyLevel":"high"}}' 
+
+=== absolute brief pointer typed after the readiness gate ===
+Read the brief at /private/var/folders/w3/15wvjyj17n15zn2qrmqs5nmm0000gn/T/fm-rovo-harness.7VXlI4/evidence/home/data/rovo-evidence-81260/launch-brief.md and follow it exactly.
+
+=== rewritten launch-brief.md (launch-brief-validation contract) ===
+# Task
+## Captain's intent
+Exercise Rovo dispatch.
+
+## Firstmate spec
+Verify launch and delivery behavior.
+
+# Current no-mistakes intent contract
+This section supersedes every earlier brief instruction about constructing `--intent`, but not later clarifications actually supplied by the captain.
+Use the serialized captain intent below plus any later words the captain actually supplied as `--intent`; never include Firstmate specification or other mixed Task content.
+
+## Captain intent authorized for --intent
+Exercise Rovo dispatch.
+
+Firstmate-authored constraints, acceptance criteria, implementation details, decisions, and tradeoffs are specification, not captain intent.
+
+=== task meta (model/effort/harness recorded) ===
+harness=rovo
+model=auto
+effort=high

@@ -1,0 +1,17 @@
+# Live guard against the REAL installed Rovo CLI (raw-PTY, exact production
+# launch-then-send shape). Command:
+#   FM_ROVO_SIGNALS_LIVE=1 bash tests/fm-rovo-signals-live-e2e.test.sh
+
+BOOTSTRAP_INFO: live rovo version: Rovo CLI: 202609.1.2
+Operating System: Darwin 25.6.0 (arm64)
+Git: git version 2.50.0
+ok - real rovo launches bare and renders its 'Welcome to Rovo!' readiness banner
+ok - real rovo delivers the typed brief pointer and renders its busy line
+ok - real rovo's session prints 'Agent cancelled' and survives a mid-tool-call Escape
+ok - real rovo exits cleanly on /exit
+EXIT=0
+
+# Each ok line is asserted from raw PTY transcript bytes emitted by the real
+# `rovo run --yolo` process: the fresh-launch banner, the "Rovo is thinking"
+# busy line produced after the typed absolute brief pointer, the "Agent
+# cancelled" render on a mid-tool-call Escape, and rovo's resume hint after /exit.
