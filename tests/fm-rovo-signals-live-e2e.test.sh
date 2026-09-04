@@ -169,3 +169,191 @@ pass "real rovo's session prints 'Agent cancelled' and survives a mid-tool-call 
 grep -aFq 'resume your' "$TRANSCRIPT" \
   || fail "real rovo did not print its resume hint after /exit"
 pass "real rovo exits cleanly on /exit"
+
+# --- allowedExternalPaths: prove the standard crewmate flow's brief-read and
+# status/report-write against real files OUTSIDE the worktree, mirroring
+# fm-spawn.sh's rovo_config_override_flag grant, and that the same access is
+# blocked by default (AGENTS.md fm-rovo-external-paths finding). rovo's
+# --config-override must be set at launch; there is no live escalation once
+# the process is running.
+EXT_DATA="$LAB/external/data/task"
+EXT_STATE="$LAB/external/state"
+mkdir -p "$EXT_DATA" "$EXT_STATE"
+EXT_DATA_REAL=$(cd "$EXT_DATA" && pwd -P) || fail "could not resolve the external brief directory"
+EXT_STATE_REAL=$(cd "$EXT_STATE" && pwd -P) || fail "could not resolve the external state directory"
+EXT_STATUS="$EXT_STATE_REAL/task.status"
+printf 'existing: seed line\n' > "$EXT_STATUS"
+EXT_TOKEN="ROVO_EXT_WRITE_$$_$RANDOM"
+cat > "$EXT_DATA_REAL/brief.md" <<EOF
+Append the exact line "working: $EXT_TOKEN" to the file $EXT_STATUS,
+preserving its existing content exactly as-is, then reply with exactly the
+word CONFIRMED and nothing else.
+EOF
+CONFIG_OVERRIDE_JSON='{"toolPermissions":{"allowedExternalPaths":["'"$EXT_DATA_REAL"'","'"$EXT_STATUS"'"]}}'
+
+mkdir -p "$LAB/workspace2"
+git -C "$LAB/workspace2" init -q || fail "could not initialize the second isolated workspace"
+WORKSPACE2=$(cd "$LAB/workspace2" && pwd -P) || fail "could not resolve the second isolated workspace"
+TRANSCRIPT2="$LAB/transcript2.log"
+
+python3 - "$ROVO_BIN" "$WORKSPACE2" "$TRANSCRIPT2" "$EXT_DATA_REAL/brief.md" "$CONFIG_OVERRIDE_JSON" <<'PY' || fail "the allowedExternalPaths grant PTY driver reported a failure"
+import os
+import pty
+import select
+import subprocess
+import sys
+import time
+
+rovo_bin, workspace, transcript_path, brief_real, config_override = sys.argv[1:6]
+
+pointer = "Read the brief at %s and follow it exactly." % brief_real
+
+pid, fd = pty.fork()
+if pid == 0:
+    os.chdir(workspace)
+    os.execvp(rovo_bin, [rovo_bin, "run", "--yolo", "--config-override", config_override])
+    os._exit(127)
+
+transcript = open(transcript_path, "wb")
+
+def pump(timeout, want=None):
+    deadline = time.time() + timeout
+    buf = b""
+    while time.time() < deadline:
+        r, _, _ = select.select([fd], [], [], 0.5)
+        if fd in r:
+            try:
+                chunk = os.read(fd, 65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            transcript.write(chunk)
+            transcript.flush()
+            buf += chunk
+        if want and want in buf:
+            return buf
+    return buf
+
+ready = pump(60, want=b"Welcome to Rovo!")
+if b"Welcome to Rovo!" not in ready:
+    sys.exit("rovo (grant session) never rendered its 'Welcome to Rovo!' readiness banner")
+
+os.write(fd, pointer.encode() + b"\r")
+reply = pump(90, want=b"CONFIRMED")
+if b"CONFIRMED" not in reply:
+    sys.exit("rovo (grant session) never confirmed the external brief-read/status-write")
+
+time.sleep(1)
+os.write(fd, b"/exit\r")
+for _ in range(60):
+    try:
+        done_pid, status = os.waitpid(pid, os.WNOHANG)
+    except ChildProcessError:
+        done_pid = pid
+        status = 0
+    if done_pid == pid:
+        break
+    pump(1)
+else:
+    subprocess.run(["kill", "-9", str(pid)])
+    sys.exit("rovo (grant session) did not exit after /exit")
+
+transcript.close()
+PY
+
+grep -aFq 'CONFIRMED' "$TRANSCRIPT2" \
+  || fail "real rovo with the allowedExternalPaths grant never confirmed the external brief-read/status-write"
+grep -aFq "working: $EXT_TOKEN" "$EXT_STATUS" \
+  || fail "real rovo with the grant did not actually append to the external status file"
+grep -aFq 'existing: seed line' "$EXT_STATUS" \
+  || fail "real rovo with the grant clobbered the external status file's existing content instead of appending"
+pass "real rovo with the allowedExternalPaths grant reads an external brief and appends to an external status file"
+
+# Negative control: the exact same shape, launched WITHOUT the grant, proves
+# the standard flow is genuinely blocked by default rather than merely
+# untested - the concrete problem this fix closes.
+NOGRANT_TOKEN="ROVO_NOGRANT_$$_$RANDOM"
+cat > "$EXT_DATA_REAL/brief-nogrant.md" <<EOF
+Append the exact line "working: $NOGRANT_TOKEN" to the file $EXT_STATUS,
+preserving its existing content exactly as-is, then reply with exactly the
+word CONFIRMED and nothing else.
+EOF
+
+mkdir -p "$LAB/workspace3"
+git -C "$LAB/workspace3" init -q || fail "could not initialize the third isolated workspace"
+WORKSPACE3=$(cd "$LAB/workspace3" && pwd -P) || fail "could not resolve the third isolated workspace"
+TRANSCRIPT3="$LAB/transcript3.log"
+
+python3 - "$ROVO_BIN" "$WORKSPACE3" "$TRANSCRIPT3" "$EXT_DATA_REAL/brief-nogrant.md" <<'PY' || fail "the no-grant control PTY driver reported a failure"
+import os
+import pty
+import select
+import subprocess
+import sys
+import time
+
+rovo_bin, workspace, transcript_path, brief_real = sys.argv[1:5]
+
+pointer = "Read the brief at %s and follow it exactly." % brief_real
+
+pid, fd = pty.fork()
+if pid == 0:
+    os.chdir(workspace)
+    os.execvp(rovo_bin, [rovo_bin, "run", "--yolo"])
+    os._exit(127)
+
+transcript = open(transcript_path, "wb")
+
+def pump(timeout, want=None):
+    deadline = time.time() + timeout
+    buf = b""
+    while time.time() < deadline:
+        r, _, _ = select.select([fd], [], [], 0.5)
+        if fd in r:
+            try:
+                chunk = os.read(fd, 65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            transcript.write(chunk)
+            transcript.flush()
+            buf += chunk
+        if want and want in buf:
+            return buf
+    return buf
+
+ready = pump(60, want=b"Welcome to Rovo!")
+if b"Welcome to Rovo!" not in ready:
+    sys.exit("rovo (no-grant session) never rendered its 'Welcome to Rovo!' readiness banner")
+
+os.write(fd, pointer.encode() + b"\r")
+# No grant: rovo cannot read the external brief at all, so it settles back to
+# an idle composer instead of ever confirming. Wait long enough for the
+# refusal to render, then move on regardless.
+pump(30)
+
+time.sleep(1)
+os.write(fd, b"/exit\r")
+for _ in range(60):
+    try:
+        done_pid, status = os.waitpid(pid, os.WNOHANG)
+    except ChildProcessError:
+        done_pid = pid
+        status = 0
+    if done_pid == pid:
+        break
+    pump(1)
+else:
+    subprocess.run(["kill", "-9", str(pid)])
+    sys.exit("rovo (no-grant session) did not exit after /exit")
+
+transcript.close()
+PY
+
+grep -aFq "working: $NOGRANT_TOKEN" "$EXT_STATUS" \
+  && fail "real rovo without the allowedExternalPaths grant still wrote to the external status file - the confinement this fix relies on is gone"
+grep -aiFq 'outside the' "$TRANSCRIPT3" \
+  || fail "real rovo without the grant did not visibly refuse the external brief/status access"
+pass "real rovo without the allowedExternalPaths grant cannot read the external brief or write the external status file"

@@ -1402,7 +1402,16 @@ launch_template() {
     # outer wrap below, like every other non-cursor harness. rovo has no
     # turn-end hook (its eventHooks fire at tool granularity only, never
     # turn-end), so no launch placeholder for one exists.
-    rovo) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS __ROVOBIN__ run --yolo __MODELFLAG____EFFORTFLAG__' ;;
+    # __ROVOCONFIGOVERRIDE__ (not __EFFORTFLAG__) carries rovo's single
+    # --config-override flag: it always grants allowedExternalPaths for this
+    # task's home-side brief dir, steering inbox, and status file - the file
+    # tool confinement that otherwise blocks the standard
+    # instructions/steering/status/report loop (rovo's bash tool has no such
+    # grant and stays confined to the worktree; the worker's own file tools do
+    # respect the grant, confirmed live) - merged with agent.efficiencyLevel
+    # when a supported effort is requested, since a second --config-override
+    # would silently discard the first (confirmed live).
+    rovo) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS __ROVOBIN__ run --yolo __MODELFLAG____ROVOCONFIGOVERRIDE__' ;;
     *) return 1 ;;
   esac
 }
@@ -1679,15 +1688,10 @@ effort_flag_for_harness() {
         max) printf -- '--reasoning-effort %s ' "$(shell_quote ultra)" ;;
       esac
       ;;
-    rovo)
-      # rovo 202609.1.2 has no --effort flag on `run`; the config key
-      # agent.efficiencyLevel (default medium, accepted low|medium|high|max, no
-      # xhigh) is set live through --config-override. xhigh is omitted rather
-      # than silently upgraded to max, per the record-and-omit contract.
-      case "$effort" in
-        low|medium|high|max) printf -- '--config-override %s ' "$(shell_quote "{\"agent\":{\"efficiencyLevel\":\"$effort\"}}")" ;;
-      esac
-      ;;
+    # rovo has no --effort flag on `run`; its effort mapping rides
+    # --config-override, but that flag is single-value (see
+    # rovo_config_override_flag below) so it is built there, merged with the
+    # mandatory allowedExternalPaths grant, rather than here.
     # opencode's interactive `opencode --prompt` launch has a verified --model
     # flag but no verified effort flag. Its `opencode run --variant` flag belongs
     # to a different, non-interactive launch mode, so fm-spawn does not pass it.
@@ -1740,6 +1744,39 @@ esac
 
 json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+# rovo confines every file-tool operation (open_files, create_file, grep, ...)
+# to its worktree by default; toolPermissions.allowedExternalPaths
+# (~/.rovo/config.yml) is the only lift, and it must be granted at launch
+# through --config-override since there is no per-session escalation once
+# the process is running. rovo's bash tool is NOT covered by this grant and
+# stays confined to the worktree regardless (confirmed live) - the standard
+# crewmate flow's literal `echo ... >> status file` bash line therefore still
+# fails under rovo, but the worker recovers by falling back to its own file
+# tools for the same append (confirmed live), which the grant below does cover.
+# --config-override itself is single-value (a second occurrence silently
+# discards the first, confirmed live), so this is the ONE place that must
+# also fold in agent.efficiencyLevel when a supported effort was requested.
+# Granted paths are real (symlink-resolved) directories/files under this
+# task's home, matching BRIEF_REAL's own resolution: the brief dir (covers
+# brief.md/launch-brief.md/report.md), the steering inbox directory (covers
+# every steer and its handled/ acknowledgement), and the status file itself.
+rovo_config_override_flag() {
+  local effort=$1 data_dir=$2 state_dir=$3 id=$4
+  local data_real state_real agent_json paths_json config_json
+  data_real=$(cd "$data_dir" && pwd -P) || return 1
+  state_real=$(cd "$state_dir" && pwd -P) || return 1
+  agent_json=
+  case "$effort" in
+    low|medium|high|max) agent_json="\"agent\":{\"efficiencyLevel\":\"$(json_escape "$effort")\"}," ;;
+  esac
+  paths_json=$(printf '"%s","%s","%s"' \
+    "$(json_escape "$data_real/$id")" \
+    "$(json_escape "$state_real/$id.inbox")" \
+    "$(json_escape "$state_real/$id.status")")
+  config_json="{${agent_json}\"toolPermissions\":{\"allowedExternalPaths\":[$paths_json]}}"
+  printf -- '--config-override %s ' "$(shell_quote "$config_json")"
 }
 
 resolved_existing_dir() {
@@ -3309,6 +3346,13 @@ MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
+if [ "$HARNESS" = rovo ]; then
+  ROVOCONFIGOVERRIDE=$(rovo_config_override_flag "$EFFORT" "$DATA" "$STATE" "$ID") || {
+    echo "error: could not resolve this task's home paths for rovo's allowedExternalPaths grant" >&2
+    exit 1
+  }
+  LAUNCH=${LAUNCH//__ROVOCONFIGOVERRIDE__/$ROVOCONFIGOVERRIDE}
+fi
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}

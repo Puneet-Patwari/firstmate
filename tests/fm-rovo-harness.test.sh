@@ -180,7 +180,7 @@ run_spawn() {
 }
 
 test_rovo_launch_then_send_is_verified() {
-  local id rec out rc launch pointer brief_real meta
+  local id rec out rc launch pointer brief_real meta data_real state_real
   id="rovo-success-z1-$$"
   rec=$(make_spawn_case success "$id")
   read_spawn_record "$rec"
@@ -214,6 +214,21 @@ test_rovo_launch_then_send_is_verified() {
   assert_grep 'effort=high' "$meta" "rovo meta lost the requested effort"
   assert_not_contains "$(cat "$CASE_DIR/tmux-calls.log")" "kill-window" \
     "a successful rovo spawn must never tear down the endpoint it just delivered into"
+
+  # rovo confines every file-tool operation to its worktree by default
+  # (confirmed live), so the launch must grant allowedExternalPaths covering
+  # this task's brief directory, steering inbox, and status file - otherwise
+  # the standard instructions/steering/status/report loop cannot work.
+  data_real=$(cd "$HOME_DIR/data/$id" && pwd -P)
+  state_real=$(cd "$HOME_DIR/state" && pwd -P)
+  assert_contains "$launch" "allowedExternalPaths" \
+    "rovo launch did not grant allowedExternalPaths for this task's home paths"
+  assert_contains "$launch" "$data_real" \
+    "rovo launch's allowedExternalPaths grant omitted the brief directory"
+  assert_contains "$launch" "$state_real/$id.inbox" \
+    "rovo launch's allowedExternalPaths grant omitted the steering inbox directory"
+  assert_contains "$launch" "$state_real/$id.status" \
+    "rovo launch's allowedExternalPaths grant omitted the status file"
   pass "fm-spawn: rovo launches bare, waits for readiness, and delivers its brief pointer"
 }
 
@@ -226,14 +241,19 @@ test_rovo_effort_xhigh_is_recorded_but_omitted() {
   rc=$?
   expect_code 0 "$rc" "rovo spawn with an unsupported effort should still succeed"
   launch=$(cat "$CASE_DIR/launch.log")
-  assert_not_contains "$launch" "config-override" "rovo launch emitted a config-override for an unsupported effort value"
+  assert_not_contains "$launch" "efficiencyLevel" "rovo launch set agent.efficiencyLevel for an unsupported effort value"
+  # --config-override still carries the mandatory allowedExternalPaths grant
+  # even when the requested effort is unsupported and omitted: the two ride
+  # one merged JSON object because rovo's --config-override is single-value
+  # (a second occurrence silently discards the first, confirmed live).
+  assert_contains "$launch" "allowedExternalPaths" "rovo launch dropped its allowedExternalPaths grant when effort was unsupported"
   meta="$HOME_DIR/state/$id.meta"
   assert_grep 'effort=xhigh' "$meta" "rovo meta did not retain the unsupported effort axis"
-  pass "fm-spawn: rovo omits the launch flag for xhigh but keeps it in task metadata"
+  pass "fm-spawn: rovo omits efficiencyLevel for xhigh but keeps its allowedExternalPaths grant, recording xhigh in task metadata"
 }
 
 test_rovo_effort_high_sets_config_override() {
-  local id rec out rc launch
+  local id rec out rc launch override_count
   id="rovo-effort-z6-$$"
   rec=$(make_spawn_case effort-high "$id")
   read_spawn_record "$rec"
@@ -243,7 +263,14 @@ test_rovo_effort_high_sets_config_override() {
   launch=$(cat "$CASE_DIR/launch.log")
   assert_contains "$launch" 'efficiencyLevel' "rovo launch did not set agent.efficiencyLevel via --config-override"
   assert_contains "$launch" '"high"' "rovo launch did not carry the requested efficiency level"
-  pass "fm-spawn: rovo's supported effort values ride --config-override"
+  # Exactly one --config-override: rovo silently discards a second occurrence
+  # (confirmed live), so efficiencyLevel and the allowedExternalPaths grant
+  # must ride the same merged JSON object rather than two flags.
+  override_count=$(printf '%s' "$launch" | grep -o -- '--config-override' | wc -l | tr -d ' ')
+  [ "$override_count" = 1 ] \
+    || fail "rovo launch emitted $override_count --config-override occurrences; a second one would silently discard the first"
+  assert_contains "$launch" 'allowedExternalPaths' "rovo launch's single --config-override dropped the allowedExternalPaths grant when merging in efficiencyLevel"
+  pass "fm-spawn: rovo's supported effort values merge into the same --config-override as its allowedExternalPaths grant"
 }
 
 test_rovo_readiness_gate_precedes_pointer() {

@@ -115,8 +115,71 @@ Treat the ~1h access-token lifetime as an ordinary operational fact rather than 
 
 ## Effort and model
 
-`agent.efficiencyLevel` accepts `low|medium|high|max` live via `--config-override '{"agent":{"efficiencyLevel":"<value>"}}'`; a requested `xhigh` (unsupported) is recorded in task metadata but the launch omits the flag, both verified against the fake-binary suite.
+`agent.efficiencyLevel` accepts `low|medium|high|max` live via `--config-override`; a requested `xhigh` (unsupported) is recorded in task metadata but omitted from that JSON object, both verified against the fake-binary suite.
+`--config-override` is single-value - a second occurrence silently discards the first rather than merging, confirmed live by reversing the order of two `--config-override` flags and observing the earlier one's effect disappear - so `fm-spawn.sh`'s `rovo_config_override_flag` folds `agent.efficiencyLevel` into the SAME JSON object as the mandatory `allowedExternalPaths` grant below rather than emitting two flags; the fake-binary suite pins that exactly one `--config-override` occurrence carries both.
 Model discovery is per-account (`/models` or ACP `session/new`); the observed live list is recorded in `references/harness/rovo.md` and must never be hardcoded.
+
+## Worktree confinement and the allowedExternalPaths fix
+
+The standard crewmate flow needs a rovo worker to read its own brief and steering messages, and to write its status and report - all of which live in the firstmate home, outside the task's git worktree.
+By default rovo confines every file-tool operation (`open_files`, `create_file`, `grep`, `expand_folder`, ...) to the workspace it was launched in, and its bash tool independently refuses the same external paths regardless of any grant.
+Confirmed live with a plain `rovo run --yolo` launched inside an isolated scratch workspace, against an unrelated file in a separate outside directory:
+
+```
+$ cat "$LAB/outside/secret.txt"
+OUTSIDE_SECRET_TOKEN_12345
+$ rovo run --yolo "Use your file-opening tool (not bash) to open and read the file $LAB/outside/secret.txt, then report its exact contents." --output-file out.txt
+$ cat out.txt
+Sorry, I can't access or read files outside the current workspace, including that temporary-system path. If you copy the file into the workspace or paste its contents here, I can help inspect it.
+
+$ rovo run --yolo "Run this exact bash command and nothing else: cat $LAB/outside/secret.txt" --output-file out.txt
+$ cat out.txt
+Captain, I can't run that command because it attempts to read a file outside the workspace, which I'm not permitted to access. Would you like to provide the file's contents here instead?
+```
+
+`toolPermissions.allowedExternalPaths` (`~/.rovo/config.yml`, default `[]`) is the only lift, and it must be granted at launch through `--config-override`: there is no live escalation once the process is already running. Confirmed live with the grant, same file, same file tool:
+
+```
+$ rovo run --yolo --config-override '{"toolPermissions":{"allowedExternalPaths":["'"$LAB"'/outside"]}}' \
+    "Use your file-opening tool (not bash) to open and read the file $LAB/outside/secret.txt, then report its exact contents." --output-file out.txt
+$ cat out.txt
+`OUTSIDE_SECRET_TOKEN_12345`
+```
+
+The grant lifts the file tools only. rovo's bash tool stays confined to the worktree regardless, confirmed live with the identical grant still active:
+
+```
+$ rovo run --yolo --config-override '{"toolPermissions":{"allowedExternalPaths":["'"$LAB"'/outside"]}}' \
+    "Run this exact bash command: echo hello >> $LAB/outside/status.txt" --output-file out.txt
+$ cat out.txt
+I can't run that command because it modifies a file outside the workspace. If you provide a workspace-relative path, I can run the equivalent command there - would you like to do that?
+```
+
+This matters because the standard crewmate contract's literal status line is a bash `echo ... >> status_file` command. Given that exact literal instruction, rovo recovered on its own by falling back to its native file tool for the same append, and succeeded, preserving the file's existing content:
+
+```
+$ echo "existing: prior" > "$LAB/outside/status2.txt"
+$ rovo run --yolo --config-override '{"toolPermissions":{"allowedExternalPaths":["'"$LAB"'/outside"]}}' \
+    'Report status by appending one line: echo "working: test line" >> '"$LAB"'/outside/status2.txt' --output-file out.txt
+$ cat out.txt
+Appended `working: test line` to `status2.txt`. What would you like to do next?
+$ cat "$LAB/outside/status2.txt"
+existing: prior
+working: test line
+```
+
+The same grant, at directory granularity, also covers listing a directory, reading a file inside it, and moving (not copying) it into a `handled/` subdirectory - the exact shape the steering-inbox acknowledgement contract (`bin/fm-task-inbox-lib.sh`) needs - confirmed live in one pass against a pre-existing `inbox/handled/` directory:
+
+```
+$ rovo run --yolo --config-override '{"toolPermissions":{"allowedExternalPaths":["'"$LAB"'/outside"]}}' \
+    "List the directory $LAB/outside/inbox for *.msg files, read 001.msg, then move it into $LAB/outside/inbox/handled/001.msg (a rename/move, not a copy-and-delete you narrate but don't do)." --output-file out.txt
+$ ls "$LAB/outside/inbox/handled"
+001.msg
+```
+
+`fm-spawn.sh`'s `rovo_config_override_flag` builds one merged JSON object per rovo launch (see "Effort and model" above for why it must be one), always granting `toolPermissions.allowedExternalPaths` for exactly three real (symlink-resolved) paths scoped to this task: the brief directory (`data/<id>/`, covering `brief.md`/`launch-brief.md`/`report.md`), the steering inbox directory (`state/<id>.inbox/`, covering every steer and its `handled/` acknowledgement), and the status file itself (`state/<id>.status`).
+`tests/fm-rovo-signals-live-e2e.test.sh` extends the launch-then-send live guard with exactly this shape end to end: a real rovo process launched with the production `--config-override` grant reads an external brief and appends to an external status file (preserving its prior content), and the same brief and status file, launched WITHOUT the grant, are left untouched while the transcript shows rovo's own refusal - proving the fix closes the gap rather than merely adding an untested flag.
+`tests/fm-rovo-harness.test.sh` pins the portable half against the fake-binary suite: the grant's three paths appear in every rovo launch (including when the requested effort is unsupported and omitted), and exactly one `--config-override` occurrence ever appears.
 
 ## Backend liveness: tmux verified live, herdr placement verified live with a herdr-side agent-detection gap
 
